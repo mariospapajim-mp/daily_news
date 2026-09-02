@@ -31,6 +31,7 @@ Setup (one-time, technical):
 import os
 import csv
 import io
+import urllib.parse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -87,19 +88,25 @@ NEWS_SOURCES = {
         "homepage": "https://www.protothema.gr",
         "main_feed_url": "https://www.protothema.gr/rss",
         "categories": {
-            "Ελλάδα":      {"filter_tag": "Ελλάδα"},
-            "Κόσμος":      {"filter_tag": "Κόσμος"},
-            "Πολιτική":    {"filter_tag": "Πολιτική"},
-            "Οικονομία":   {"filter_tag": "Οικονομία"},
-            "Sports":      {"filter_tag": "Sports"},
-            "Gala":        {"filter_tag": "Gala"},
-            "Αυτοκίνητο":  {"filter_tag": "Αυτοκίνητο"},
-            "People":      {"filter_tag": "People"},
-            "Πολιτισμός":  {"filter_tag": "Πολιτισμός"},
-            "Τεχνολογία":  {"filter_tag": "Τεχνολογία"},
-            "Περιβάλλον":  {"filter_tag": "Περιβάλλον"},
-            "Υγεία + Ζωή": {"filter_tag": "Υγεία + Ζωή"},
-            "Life Style":  {"filter_tag": "Life Style"},
+            # NOTE: Πρώτο Θέμα's RSS <category> tag only covers a small set
+            # of values (Sports, Κόσμος, Ελλάδα, Οικονομία, Gala, Πολιτική,
+            # Πολιτισμός) - it does NOT match the site's full menu. Every
+            # article's URL reliably reveals its real section though (e.g.
+            # .../car-and-speed/article/...), so most categories are
+            # matched by URL path instead - much more reliable.
+            "Ελλάδα":      {"filter_path": "greece"},
+            "Κόσμος":      {"filter_path": "world"},
+            "Πολιτική":    {"filter_path": "politics"},
+            "Οικονομία":   {"filter_path": "economy"},
+            "Sports":      {"filter_path": "sports"},
+            "Gala":        {"filter_path": "life-style"},
+            "Αυτοκίνητο":  {"filter_path": "car-and-speed"},
+            "People":      {"filter_path": "people"},
+            "Πολιτισμός":  {"filter_path": "culture"},
+            "Τεχνολογία":  {"filter_path": "technology"},
+            "Περιβάλλον":  {"filter_path": "environment"},
+            "Υγεία + Ζωή": {"filter_path": "ygeia"},
+            "Life Style":  {"filter_path": "life-style"},
         },
     },
 }
@@ -252,21 +259,56 @@ def _headlines_for_row(source_name, category_name, limit):
             print(f"  ⚠️  No entries returned for {source_name}/{category_name} ({category_cfg['feed_url']})")
         return [e.get("title", "").strip() for e in entries if e.get("title")]
 
-    elif "filter_tag" in category_cfg:
+    elif "filter_tag" in category_cfg or "filter_path" in category_cfg:
         parsed = _get_parsed_feed(source_cfg["main_feed_url"])
-        wanted_tag = category_cfg["filter_tag"]
         matches = []
-        for entry in parsed.entries:
-            tags = [t.get("term", "") for t in entry.get("tags", [])]
-            if wanted_tag in tags:
-                title = entry.get("title", "").strip()
-                if title:
-                    matches.append(title)
-            if len(matches) >= limit:
-                break
-        if not matches:
-            print(f"  ⚠️  No entries tagged {wanted_tag!r} found in {source_name}'s main feed")
-        return matches
+
+        if "filter_path" in category_cfg:
+            wanted = category_cfg["filter_path"]
+            match_label = f"path '/{wanted}/'"
+            for entry in parsed.entries:
+                link = entry.get("link", "")
+                if f"/{wanted}/article/" in link:
+                    title = entry.get("title", "").strip()
+                    if title:
+                        matches.append(title)
+                if len(matches) >= limit:
+                    break
+        else:
+            wanted = category_cfg["filter_tag"]
+            match_label = f"tag {wanted!r}"
+            for entry in parsed.entries:
+                tags = [t.get("term", "") for t in entry.get("tags", [])]
+                if wanted in tags:
+                    title = entry.get("title", "").strip()
+                    if title:
+                        matches.append(title)
+                if len(matches) >= limit:
+                    break
+
+        if matches:
+            return matches
+
+        # Fallback: this category hasn't had a recent story in the main
+        # feed's window. Ask Google News for the latest matching story on
+        # this site instead, so the category still shows something rather
+        # than nothing.
+        print(f"  ℹ️  No match by {match_label} in recent {source_name} feed - trying Google News fallback")
+        homepage = source_cfg.get("homepage", "")
+        site_domain = homepage.replace("https://", "").replace("http://", "").rstrip("/")
+        search_term = category_name  # use the human-readable category name for the search
+        query = urllib.parse.quote(f"site:{site_domain} {search_term}")
+        fallback_url = f"https://news.google.com/rss/search?q={query}&hl=el&gl=GR&ceid=GR:el"
+        try:
+            fallback_parsed = _get_parsed_feed(fallback_url)
+            fallback_entries = fallback_parsed.entries[:limit]
+            fallback_titles = [e.get("title", "").strip() for e in fallback_entries if e.get("title")]
+            if not fallback_titles:
+                print(f"  ⚠️  Google News fallback also found nothing for {category_name!r}")
+            return fallback_titles
+        except Exception as e:
+            print(f"  ⚠️  Google News fallback failed for {category_name!r}: {e}")
+            return []
 
     return []
 
