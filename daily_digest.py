@@ -87,26 +87,26 @@ NEWS_SOURCES = {
     "Πρώτο Θέμα": {
         "homepage": "https://www.protothema.gr",
         "main_feed_url": "https://www.protothema.gr/rss",
+        # Πρώτο Θέμα publishes a dedicated RSS feed per section, same as
+        # 20 Minuten (confirmed directly for car-and-speed, economy,
+        # environment, and culture/theater). Each category below uses its
+        # own feed rather than filtering the main feed, which is more
+        # reliable. If a slug guess below turns out wrong, the automatic
+        # Google News fallback (see _headlines_for_row) still catches it.
         "categories": {
-            # NOTE: Πρώτο Θέμα's RSS <category> tag only covers a small set
-            # of values (Sports, Κόσμος, Ελλάδα, Οικονομία, Gala, Πολιτική,
-            # Πολιτισμός) - it does NOT match the site's full menu. Every
-            # article's URL reliably reveals its real section though (e.g.
-            # .../car-and-speed/article/...), so most categories are
-            # matched by URL path instead - much more reliable.
-            "Ελλάδα":      {"filter_path": "greece"},
-            "Κόσμος":      {"filter_path": "world"},
-            "Πολιτική":    {"filter_path": "politics"},
-            "Οικονομία":   {"filter_path": "economy"},
-            "Sports":      {"filter_path": "sports"},
-            "Gala":        {"filter_path": "life-style"},
-            "Αυτοκίνητο":  {"filter_path": "car-and-speed"},
-            "People":      {"filter_path": "people"},
-            "Πολιτισμός":  {"filter_path": "culture"},
-            "Τεχνολογία":  {"filter_path": "technology"},
-            "Περιβάλλον":  {"filter_path": "environment"},
-            "Υγεία + Ζωή": {"filter_path": "ygeia"},
-            "Life Style":  {"filter_path": "life-style"},
+            "Ελλάδα":      {"feed_url": "https://www.protothema.gr/greece/rss"},
+            "Κόσμος":      {"feed_url": "https://www.protothema.gr/world/rss"},
+            "Πολιτική":    {"feed_url": "https://www.protothema.gr/politics/rss"},
+            "Οικονομία":   {"feed_url": "https://www.protothema.gr/economy/rss"},
+            "Sports":      {"feed_url": "https://www.protothema.gr/sports/rss"},
+            "Gala":        {"feed_url": "https://www.protothema.gr/life-style/rss"},
+            "Αυτοκίνητο":  {"feed_url": "https://www.protothema.gr/car-and-speed/rss"},
+            "People":      {"feed_url": "https://www.protothema.gr/people/rss"},
+            "Πολιτισμός":  {"feed_url": "https://www.protothema.gr/culture/rss"},
+            "Τεχνολογία":  {"feed_url": "https://www.protothema.gr/technology/rss"},
+            "Περιβάλλον":  {"feed_url": "https://www.protothema.gr/environment/rss"},
+            "Υγεία + Ζωή": {"feed_url": "https://www.protothema.gr/ygeia/rss"},
+            "Life Style":  {"feed_url": "https://www.protothema.gr/life-style/rss"},
         },
     },
 }
@@ -237,6 +237,29 @@ def _get_parsed_feed(feed_url):
     return _feed_cache[feed_url]
 
 
+def _google_news_fallback(source_cfg, category_name, search_scope_suffix, limit):
+    """
+    Last resort when a category's dedicated feed is empty, missing, or the
+    slug guess was wrong: ask Google News for the latest matching story on
+    this exact site instead, so the category still shows something.
+    """
+    homepage = source_cfg.get("homepage", "")
+    site_domain = homepage.replace("https://", "").replace("http://", "").rstrip("/")
+    search_scope = f"site:{site_domain}{search_scope_suffix}"
+    query = urllib.parse.quote(search_scope)
+    fallback_url = f"https://news.google.com/rss/search?q={query}&hl=el&gl=GR&ceid=GR:el"
+    try:
+        fallback_parsed = _get_parsed_feed(fallback_url)
+        fallback_entries = fallback_parsed.entries[:limit]
+        fallback_titles = [e.get("title", "").strip() for e in fallback_entries if e.get("title")]
+        if not fallback_titles:
+            print(f"  ⚠️  Google News fallback also found nothing for {category_name!r}")
+        return fallback_titles
+    except Exception as e:
+        print(f"  ⚠️  Google News fallback failed for {category_name!r}: {e}")
+        return []
+
+
 def _headlines_for_row(source_name, category_name, limit):
     if limit <= 0:
         return []
@@ -251,13 +274,23 @@ def _headlines_for_row(source_name, category_name, limit):
         return []
 
     if "feed_url" in category_cfg:
-        parsed = _get_parsed_feed(category_cfg["feed_url"])
-        if getattr(parsed, "bozo", False):
-            print(f"  ⚠️  Feed error for {source_name}/{category_name}: {parsed.get('bozo_exception')}")
-        entries = parsed.entries[:limit]
-        if not entries:
-            print(f"  ⚠️  No entries returned for {source_name}/{category_name} ({category_cfg['feed_url']})")
-        return [e.get("title", "").strip() for e in entries if e.get("title")]
+        feed_url = category_cfg["feed_url"]
+        parsed = _get_parsed_feed(feed_url)
+        bozo = getattr(parsed, "bozo", False)
+        entries = parsed.entries[:limit] if not bozo else []
+        titles = [e.get("title", "").strip() for e in entries if e.get("title")]
+        if titles:
+            return titles
+
+        # Dedicated feed returned nothing (bad slug guess, or genuinely no
+        # stories right now) - try Google News restricted to this site's
+        # section path as a fallback.
+        reason = f"feed error ({parsed.get('bozo_exception')})" if bozo else "empty feed"
+        print(f"  ℹ️  {source_name}/{category_name} dedicated feed issue ({reason}) - trying Google News fallback")
+        # Derive the section path from the feed URL itself, e.g.
+        # https://x.com/car-and-speed/rss -> /car-and-speed
+        section_path = feed_url.replace(source_cfg.get("homepage", ""), "").rsplit("/rss", 1)[0]
+        return _google_news_fallback(source_cfg, category_name, section_path, limit)
 
     elif "filter_tag" in category_cfg or "filter_path" in category_cfg:
         parsed = _get_parsed_feed(source_cfg["main_feed_url"])
@@ -289,26 +322,12 @@ def _headlines_for_row(source_name, category_name, limit):
         if matches:
             return matches
 
-        # Fallback: this category hasn't had a recent story in the main
-        # feed's window. Ask Google News for the latest matching story on
-        # this site instead, so the category still shows something rather
-        # than nothing.
         print(f"  ℹ️  No match by {match_label} in recent {source_name} feed - trying Google News fallback")
-        homepage = source_cfg.get("homepage", "")
-        site_domain = homepage.replace("https://", "").replace("http://", "").rstrip("/")
-        search_term = category_name  # use the human-readable category name for the search
-        query = urllib.parse.quote(f"site:{site_domain} {search_term}")
-        fallback_url = f"https://news.google.com/rss/search?q={query}&hl=el&gl=GR&ceid=GR:el"
-        try:
-            fallback_parsed = _get_parsed_feed(fallback_url)
-            fallback_entries = fallback_parsed.entries[:limit]
-            fallback_titles = [e.get("title", "").strip() for e in fallback_entries if e.get("title")]
-            if not fallback_titles:
-                print(f"  ⚠️  Google News fallback also found nothing for {category_name!r}")
-            return fallback_titles
-        except Exception as e:
-            print(f"  ⚠️  Google News fallback failed for {category_name!r}: {e}")
-            return []
+        if "filter_path" in category_cfg:
+            scope_suffix = f"/{category_cfg['filter_path']}"
+        else:
+            scope_suffix = f" {category_cfg['filter_tag']}"
+        return _google_news_fallback(source_cfg, category_name, scope_suffix, limit)
 
     return []
 
