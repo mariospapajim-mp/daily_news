@@ -111,6 +111,10 @@ NEWS_SOURCES = {
 def _fetch_csv_rows(url):
     resp = requests.get(url, timeout=15)
     resp.raise_for_status()
+    # Google's CSV export doesn't always declare UTF-8 in its headers, which
+    # can silently corrupt non-Latin text (Greek, etc.) if we trust
+    # requests' auto-detected encoding. Force UTF-8 explicitly.
+    resp.encoding = "utf-8"
     reader = csv.reader(io.StringIO(resp.text))
     return [row for row in reader if any(cell.strip() for cell in row)]
 
@@ -232,14 +236,20 @@ def _headlines_for_row(source_name, category_name, limit):
 
     source_cfg = NEWS_SOURCES.get(source_name)
     if not source_cfg:
+        print(f"  ⚠️  Unknown source in sheet: {source_name!r} (check spelling matches NEWS_SOURCES)")
         return []
     category_cfg = source_cfg["categories"].get(category_name)
     if not category_cfg:
+        print(f"  ⚠️  Unknown category in sheet: {source_name!r} / {category_name!r}")
         return []
 
     if "feed_url" in category_cfg:
         parsed = _get_parsed_feed(category_cfg["feed_url"])
+        if getattr(parsed, "bozo", False):
+            print(f"  ⚠️  Feed error for {source_name}/{category_name}: {parsed.get('bozo_exception')}")
         entries = parsed.entries[:limit]
+        if not entries:
+            print(f"  ⚠️  No entries returned for {source_name}/{category_name} ({category_cfg['feed_url']})")
         return [e.get("title", "").strip() for e in entries if e.get("title")]
 
     elif "filter_tag" in category_cfg:
@@ -254,6 +264,8 @@ def _headlines_for_row(source_name, category_name, limit):
                     matches.append(title)
             if len(matches) >= limit:
                 break
+        if not matches:
+            print(f"  ⚠️  No entries tagged {wanted_tag!r} found in {source_name}'s main feed")
         return matches
 
     return []
