@@ -32,7 +32,13 @@ NEWS_FEEDS = {
     # "iefimerida.gr": skipped - no confirmed RSS feed URL found
 }
 
-ARTICLES_PER_FEED = 4
+# Main homepage link shown under each source's headlines
+NEWS_SITE_URLS = {
+    "20 Minuten": "https://www.20min.ch",
+    "Πρώτο Θέμα": "https://www.protothema.gr",
+}
+
+ARTICLES_PER_FEED = 8
 
 # ============ WEATHER ============
 
@@ -89,7 +95,9 @@ def get_news():
             titles = [t.rstrip(".") for t in titles if t]
             # Join into one paragraph: "Headline one. Headline two. ..."
             paragraph = ". ".join(titles) + "."
-            sections.append(f"📰 <b>{source_name}</b>\n{paragraph}")
+            site_url = NEWS_SITE_URLS.get(source_name, "")
+            link_line = f"\n🔗 {site_url}" if site_url else ""
+            sections.append(f"📰 <b>{source_name}</b>\n{paragraph}{link_line}")
         except Exception as e:
             sections.append(f"📰 <b>{source_name}</b>\n(couldn't fetch: {e})")
     return "\n\n".join(sections)
