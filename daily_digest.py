@@ -93,11 +93,11 @@ def get_news():
                 continue
             titles = [entry.get("title", "").strip() for entry in entries]
             titles = [t.rstrip(".") for t in titles if t]
-            # Join into one paragraph: "Headline one. Headline two. ..."
-            paragraph = ". ".join(titles) + "."
+            # One headline per line, as a bullet list, for easier reading
+            bullet_lines = "\n".join(f"• {t}." for t in titles)
             site_url = NEWS_SITE_URLS.get(source_name, "")
             link_line = f"\n🔗 {site_url}" if site_url else ""
-            sections.append(f"📰 <b>{source_name}</b>\n{paragraph}{link_line}")
+            sections.append(f"📰 <b>{source_name}</b>\n{bullet_lines}{link_line}")
         except Exception as e:
             sections.append(f"📰 <b>{source_name}</b>\n(couldn't fetch: {e})")
     return "\n\n".join(sections)
