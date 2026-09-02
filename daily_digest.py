@@ -3,44 +3,53 @@ Daily Digest Bot
 -----------------
 Sends each recipient a personalized Telegram message: weather (today +
 tomorrow) for a shared location, plus news headlines picked per-recipient
-by source and category - and delivered at a time you set per recipient.
+by source and category - delivered at a time set per recipient.
 
-Setup:
+EVERYTHING YOU MAINTAIN DAY-TO-DAY LIVES IN YOUR GOOGLE SHEET, NOT HERE.
+  - "Recipients" tab: Name | ChatID | Time  -> who gets a message, and when.
+  - "NewsPlan" tab: Source | category | <one column per recipient name>
+    -> how many headlines each person gets per category. 0 = skip it.
+Add a recipient: add a row in "Recipients", then a matching column in
+"NewsPlan". Add/remove a category: add/remove a row in "NewsPlan" (only
+using categories already defined in NEWS_SOURCES below). Change a time or
+a headline count: just edit that cell in Sheets. No code changes, ever,
+for any of that.
+
+Setup (one-time, technical):
   1. pip install requests feedparser
   2. Set environment variable (or GitHub Actions secret):
        TELEGRAM_BOT_TOKEN   - token from @BotFather
-  3. Edit the CONFIG TABLES below - this is the only part you should need
-     to touch day-to-day.
+  3. Make sure the two SHEET_CSV_URLS below point at your sheet's tabs
+     (already done for this setup).
   4. The GitHub Actions workflow runs this script every 15 minutes. Each
-     run checks the current time in Zurich and only sends messages to
-     recipients whose "send_time" matches the current 15-minute slot, so
-     everyone gets their message at their own chosen time without you
-     needing a separate schedule per person.
-
-HOW THE CONFIG WORKS
----------------------
-1. WEATHER_LOCATION - one shared weather location for everyone.
-2. NEWS_SOURCES - defines every available (source, category) combination
-   and the RSS feed URL / tag that supplies it. Add new sources/categories
-   here once; the plan table below then offers them to every recipient.
-3. RECIPIENTS - one row per person: their name, Telegram chat ID, and what
-   time they should receive their message (24h "HH:MM", Zurich time).
-4. NEWS_PLAN - THE MAIN TABLE TO MAINTAIN. One row per (source, category);
-   one column per recipient. Just set a number = how many headlines that
-   person gets from that row. 0 means they don't get that category.
-   Adding a new recipient or category never requires copying lines -
-   just add one row (category) or one key in every row's dict (recipient).
+     run re-reads the sheet, checks the current time in Zurich, and only
+     sends a message to recipients whose "Time" matches the current
+     15-minute slot - so everyone gets their message at their own chosen
+     time without a separate schedule per person.
 """
 
 import os
-from datetime import datetime, date
+import csv
+import io
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
 import feedparser
 
 # ======================================================================
-# 1. WEATHER LOCATION (shared by everyone)
+# GOOGLE SHEET SOURCE (the only two links that ever need to change)
+# ======================================================================
+# These point at your sheet's two tabs, exported as plain CSV. If you ever
+# recreate the sheet, replace these two URLs with the new tab links,
+# changing "/edit?gid=..." to "/export?format=csv&gid=...".
+
+SHEET_ID = "1nqe0sPAcu3SPPa9C07ArXqWbYCx1NhPKwfBFQ0y0PuM"
+RECIPIENTS_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=2057126119"
+NEWS_PLAN_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+
+# ======================================================================
+# WEATHER LOCATION (shared by everyone - edit here if you ever move)
 # ======================================================================
 
 WEATHER_LOCATION = {
@@ -52,22 +61,12 @@ WEATHER_LOCATION = {
 LOCAL_TIMEZONE = ZoneInfo("Europe/Zurich")
 
 # ======================================================================
-# 2. NEWS SOURCES - every available (source, category) combination
+# NEWS SOURCES - technical definition of every available category.
+# This is the one part of the whole system that still lives in code,
+# because it involves real RSS feed URLs. You won't need to touch this
+# unless you want to add a brand-new news source/category beyond what's
+# already offered in your NewsPlan sheet.
 # ======================================================================
-#
-# Two kinds of entries:
-#   "feed_url"    -> a dedicated RSS feed for that exact category
-#                     (used for 20 Minuten, which publishes one feed per
-#                     section).
-#   "filter_tag"  -> pulls from the source's single main feed, but only
-#                     keeps headlines whose RSS <category> tag matches
-#                     this value (used for Πρώτο Θέμα, which tags each
-#                     headline instead of offering per-section feeds).
-#
-# To add a new category: add one row here with the right feed_url or
-# filter_tag, then add a matching row in NEWS_PLAN below - it will
-# automatically be offered to every recipient (starting at 0 headlines
-# until you set a number for them).
 
 NEWS_SOURCES = {
     "20 Minuten": {
@@ -76,57 +75,94 @@ NEWS_SOURCES = {
             "Top Stories": {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten"},
             "Schweiz":     {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/schweiz"},
             "Sport":       {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/sport"},
+            "Wirtschaft":  {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/wirtschaft"},
+            "Regionen":    {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/regionen"},
+            "Lifestyle":   {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/lifestyle"},
+            "Ausland":     {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/ausland"},
+            "People":      {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/people"},
+            "Good Vibes":  {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/good-vibes"},
         },
     },
     "Πρώτο Θέμα": {
         "homepage": "https://www.protothema.gr",
-        "main_feed_url": "https://www.protothema.gr/rss",  # shared by all filter_tag categories below
+        "main_feed_url": "https://www.protothema.gr/rss",
         "categories": {
-            "Ελλάδα":    {"filter_tag": "Ελλάδα"},
-            "Κόσμος":    {"filter_tag": "Κόσμος"},
-            "Πολιτική":  {"filter_tag": "Πολιτική"},
-            "Οικονομία": {"filter_tag": "Οικονομία"},
-            "Sports":    {"filter_tag": "Sports"},
-            "Gala":      {"filter_tag": "Gala"},  # lifestyle / celebrity
+            "Ελλάδα":      {"filter_tag": "Ελλάδα"},
+            "Κόσμος":      {"filter_tag": "Κόσμος"},
+            "Πολιτική":    {"filter_tag": "Πολιτική"},
+            "Οικονομία":   {"filter_tag": "Οικονομία"},
+            "Sports":      {"filter_tag": "Sports"},
+            "Gala":        {"filter_tag": "Gala"},
+            "Αυτοκίνητο":  {"filter_tag": "Αυτοκίνητο"},
+            "People":      {"filter_tag": "People"},
+            "Πολιτισμός":  {"filter_tag": "Πολιτισμός"},
+            "Τεχνολογία":  {"filter_tag": "Τεχνολογία"},
+            "Περιβάλλον":  {"filter_tag": "Περιβάλλον"},
+            "Υγεία + Ζωή": {"filter_tag": "Υγεία + Ζωή"},
+            "Life Style":  {"filter_tag": "Life Style"},
         },
     },
 }
 
 # ======================================================================
-# 3. RECIPIENTS - one row per person
+# READ CONFIG LIVE FROM GOOGLE SHEETS
 # ======================================================================
-# "send_time" is 24h "HH:MM" in Zurich local time. The script runs every
-# 15 minutes, so times should ideally land on a quarter-hour (e.g. 07:15,
-# 07:30) - if not, it'll send on the next run at or after that time.
 
-RECIPIENTS = [
-    {"name": "Marios", "chat_id": "685566804",  "send_time": "07:15"},
-    {"name": "Wife",   "chat_id": "8581702180", "send_time": "07:15"},
-]
+def _fetch_csv_rows(url):
+    resp = requests.get(url, timeout=15)
+    resp.raise_for_status()
+    reader = csv.reader(io.StringIO(resp.text))
+    return [row for row in reader if any(cell.strip() for cell in row)]
 
-# ======================================================================
-# 4. NEWS PLAN - THE MAIN TABLE TO MAINTAIN DAY-TO-DAY
-# ======================================================================
-# One row per (Source, Category). For each recipient, set a number: how
-# many headlines they get from that row. Use 0 to skip it for them.
-#
-# To add a recipient: add them to RECIPIENTS above, then add their name
-# as a new key (with a number) in every row's dict below.
-# To add a category: add one row here (and the matching entry in
-# NEWS_SOURCES above).
 
-NEWS_PLAN = [
-    # Source          Category       {Recipient: headline_count}
-    ("20 Minuten",   "Top Stories",  {"Marios": 5, "Wife": 5}),
-    ("20 Minuten",   "Schweiz",      {"Marios": 0, "Wife": 0}),
-    ("20 Minuten",   "Sport",        {"Marios": 3, "Wife": 0}),
-    ("Πρώτο Θέμα",   "Ελλάδα",       {"Marios": 4, "Wife": 4}),
-    ("Πρώτο Θέμα",   "Κόσμος",       {"Marios": 0, "Wife": 0}),
-    ("Πρώτο Θέμα",   "Πολιτική",     {"Marios": 0, "Wife": 0}),
-    ("Πρώτο Θέμα",   "Οικονομία",    {"Marios": 0, "Wife": 0}),
-    ("Πρώτο Θέμα",   "Sports",       {"Marios": 3, "Wife": 0}),
-    ("Πρώτο Θέμα",   "Gala",         {"Marios": 0, "Wife": 4}),
-]
+def load_recipients():
+    """Reads the 'Recipients' tab: Name | ChatID | Time"""
+    rows = _fetch_csv_rows(RECIPIENTS_CSV_URL)
+    header, data_rows = rows[0], rows[1:]
+    recipients = []
+    for row in data_rows:
+        name, chat_id, send_time = (row + ["", "", ""])[:3]
+        name, chat_id, send_time = name.strip(), chat_id.strip(), send_time.strip()
+        if not name or not chat_id:
+            continue
+        # Normalize times like "7:00" or "7:5" to "07:00" / "07:05"
+        if ":" in send_time:
+            h, m = send_time.split(":", 1)
+            send_time = f"{int(h):02d}:{int(m):02d}"
+        recipients.append({"name": name, "chat_id": chat_id, "send_time": send_time})
+    return recipients
+
+
+def load_news_plan(recipient_names):
+    """Reads the 'NewsPlan' tab: Source | category | <one column per recipient>"""
+    rows = _fetch_csv_rows(NEWS_PLAN_CSV_URL)
+    header, data_rows = rows[0], rows[1:]
+    # header looks like: ["Source", "category", "marios", "wife", ...]
+    recipient_columns = header[2:]
+
+    plan = []
+    for row in data_rows:
+        row = row + [""] * (len(header) - len(row))
+        source_name, category_name = row[0].strip(), row[1].strip()
+        if not source_name or not category_name:
+            continue
+        counts = {}
+        for col_name, raw_value in zip(recipient_columns, row[2:]):
+            raw_value = raw_value.strip()
+            try:
+                count = int(raw_value) if raw_value else 0
+            except ValueError:
+                count = 0
+            # Match the sheet's recipient column name to the actual
+            # recipient name case-insensitively, so "marios" in the sheet
+            # matches "Marios" in the Recipients tab.
+            for name in recipient_names:
+                if name.lower() == col_name.strip().lower():
+                    counts[name] = count
+                    break
+        plan.append((source_name, category_name, counts))
+    return plan
+
 
 # ======================================================================
 # WEATHER
@@ -191,12 +227,15 @@ def _get_parsed_feed(feed_url):
 
 
 def _headlines_for_row(source_name, category_name, limit):
-    """Returns up to `limit` headline titles for one (source, category) row."""
     if limit <= 0:
         return []
 
-    source_cfg = NEWS_SOURCES[source_name]
-    category_cfg = source_cfg["categories"][category_name]
+    source_cfg = NEWS_SOURCES.get(source_name)
+    if not source_cfg:
+        return []
+    category_cfg = source_cfg["categories"].get(category_name)
+    if not category_cfg:
+        return []
 
     if "feed_url" in category_cfg:
         parsed = _get_parsed_feed(category_cfg["feed_url"])
@@ -220,10 +259,9 @@ def _headlines_for_row(source_name, category_name, limit):
     return []
 
 
-def get_news_section_for_recipient(recipient_name):
-    """Builds the news section text for one recipient, from NEWS_PLAN."""
+def get_news_section_for_recipient(recipient_name, news_plan):
     by_source = {}
-    for source_name, category_name, counts in NEWS_PLAN:
+    for source_name, category_name, counts in news_plan:
         limit = counts.get(recipient_name, 0)
         if limit <= 0:
             continue
@@ -231,7 +269,7 @@ def get_news_section_for_recipient(recipient_name):
 
     sections = []
     for source_name, category_picks in by_source.items():
-        source_cfg = NEWS_SOURCES[source_name]
+        source_cfg = NEWS_SOURCES.get(source_name, {})
         source_block_lines = []
         for category_name, limit in category_picks:
             try:
@@ -280,11 +318,6 @@ def send_telegram_message(chat_id, text):
 # ======================================================================
 
 def _current_zurich_slot():
-    """
-    Returns the current time in Zurich, rounded DOWN to the nearest
-    15-minute mark, as an "HH:MM" string. This is compared against each
-    recipient's send_time so a run every 15 minutes catches everyone.
-    """
     now = datetime.now(LOCAL_TIMEZONE)
     rounded_minute = (now.minute // 15) * 15
     return now.replace(minute=rounded_minute).strftime("%H:%M")
@@ -298,10 +331,10 @@ def _should_send_now(recipient, current_slot, force_all):
 # MAIN
 # ======================================================================
 
-def build_message_for_recipient(recipient):
+def build_message_for_recipient(recipient, news_plan):
     today_str = datetime.now(LOCAL_TIMEZONE).strftime("%A, %d %B %Y")
     weather_section = get_weather_section()
-    news_section = get_news_section_for_recipient(recipient["name"])
+    news_section = get_news_section_for_recipient(recipient["name"], news_plan)
 
     return (
         f"<b>☀️ Daily Digest — {today_str}</b>\n\n"
@@ -311,16 +344,20 @@ def build_message_for_recipient(recipient):
 
 
 if __name__ == "__main__":
-    # Set FORCE_SEND_ALL=1 as an env var to bypass the time check and send
-    # to everyone immediately - useful for manual testing.
     force_all = os.environ.get("FORCE_SEND_ALL") == "1"
+
+    recipients = load_recipients()
+    recipient_names = [r["name"] for r in recipients]
+    news_plan = load_news_plan(recipient_names)
+
     current_slot = _current_zurich_slot()
+    print(f"Loaded {len(recipients)} recipients, {len(news_plan)} news-plan rows.")
     print(f"Current Zurich time slot: {current_slot} (force_all={force_all})")
 
-    for recipient in RECIPIENTS:
+    for recipient in recipients:
         if not _should_send_now(recipient, current_slot, force_all):
             print(f"Skipping {recipient['name']}: scheduled for {recipient['send_time']}, not {current_slot}")
             continue
-        message = build_message_for_recipient(recipient)
+        message = build_message_for_recipient(recipient, news_plan)
         print(f"--- Sending to {recipient['name']} ({recipient['chat_id']}) ---")
         send_telegram_message(recipient["chat_id"], message)
