@@ -101,11 +101,11 @@ NEWS_SOURCES = {
             "Sports":      {"feed_url": "https://www.protothema.gr/sports/rss"},
             "Gala":        {"feed_url": "https://www.protothema.gr/life-style/rss"},
             "Αυτοκίνητο":  {"feed_url": "https://www.protothema.gr/car-and-speed/rss"},
-            "People":      {"feed_url": "https://www.protothema.gr/people/rss"},
+            "People":      {"feed_url": "https://www.protothema.gr/world/rss"},
             "Πολιτισμός":  {"feed_url": "https://www.protothema.gr/culture/rss"},
             "Τεχνολογία":  {"feed_url": "https://www.protothema.gr/technology/rss"},
             "Περιβάλλον":  {"feed_url": "https://www.protothema.gr/environment/rss"},
-            "Υγεία + Ζωή": {"feed_url": "https://www.protothema.gr/ygeia/rss"},
+            "Υγεία + Ζωή": {"feed_url": "https://www.protothema.gr/zoi/rss"},
             "Life Style":  {"feed_url": "https://www.protothema.gr/life-style/rss"},
         },
     },
@@ -230,10 +230,27 @@ def get_weather_section():
 
 _feed_cache = {}
 
+# Some sites block requests that don't look like they come from a real
+# browser (feedparser's default identifies itself plainly as a bot, which
+# some servers reject with an HTML error page instead of the real feed).
+_BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
+
 
 def _get_parsed_feed(feed_url):
     if feed_url not in _feed_cache:
-        _feed_cache[feed_url] = feedparser.parse(feed_url)
+        try:
+            resp = requests.get(feed_url, headers=_BROWSER_HEADERS, timeout=15)
+            resp.raise_for_status()
+            _feed_cache[feed_url] = feedparser.parse(resp.content)
+        except Exception:
+            # Fall back to feedparser's own fetching if the manual request
+            # fails for some reason, so we still get *a* result to inspect.
+            _feed_cache[feed_url] = feedparser.parse(feed_url)
     return _feed_cache[feed_url]
 
 
@@ -431,6 +448,12 @@ if __name__ == "__main__":
         if not _should_send_now(recipient, current_slot, force_all):
             print(f"Skipping {recipient['name']}: scheduled for {recipient['send_time']}, not {current_slot}")
             continue
-        message = build_message_for_recipient(recipient, news_plan)
-        print(f"--- Sending to {recipient['name']} ({recipient['chat_id']}) ---")
-        send_telegram_message(recipient["chat_id"], message)
+        try:
+            message = build_message_for_recipient(recipient, news_plan)
+            print(f"--- Sending to {recipient['name']} ({recipient['chat_id']}) ---")
+            send_telegram_message(recipient["chat_id"], message)
+        except Exception as e:
+            # Never let one recipient's failure (bad feed, network hiccup,
+            # etc.) stop the whole run - log it and keep going so everyone
+            # else still gets their message.
+            print(f"  ❌ Failed to build/send message for {recipient['name']}: {e}")
