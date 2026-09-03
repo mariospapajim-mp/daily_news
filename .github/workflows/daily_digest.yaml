@@ -1,0 +1,52 @@
+name: Daily Digest
+
+on:
+  schedule:
+    # Runs every 15 minutes, around the clock. The script itself checks
+    # each recipient's "send_time" (set in daily_digest.py) against the
+    # current time in Zurich and only actually sends a message when it's
+    # that recipient's turn - so this single schedule covers everyone,
+    # no matter what time you set for each person, and it stays correct
+    # across daylight saving changes automatically.
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      force_send_all:
+        description: "Send to everyone immediately, ignoring their send_time (for testing)"
+        type: boolean
+        default: false
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed so the workflow can commit sent_log.json back
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests feedparser
+
+      - name: Run daily digest script
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          FORCE_SEND_ALL: ${{ inputs.force_send_all && '1' || '0' }}
+        run: python daily_digest.py
+
+      - name: Save sent-log so recipients aren't messaged twice in one day
+        run: |
+          if [ -n "$(git status --porcelain sent_log.json)" ]; then
+            git config user.name "daily-digest-bot"
+            git config user.email "actions@github.com"
+            git add sent_log.json
+            git commit -m "Update sent log [skip ci]"
+            git push
+          else
+            echo "No change to sent_log.json"
+          fi
