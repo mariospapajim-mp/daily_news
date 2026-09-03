@@ -31,8 +31,9 @@ Setup (one-time, technical):
 import os
 import csv
 import io
+import json
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -115,15 +116,22 @@ NEWS_SOURCES = {
 # READ CONFIG LIVE FROM GOOGLE SHEETS
 # ======================================================================
 
-def _fetch_csv_rows(url):
-    resp = requests.get(url, timeout=15)
-    resp.raise_for_status()
-    # Google's CSV export doesn't always declare UTF-8 in its headers, which
-    # can silently corrupt non-Latin text (Greek, etc.) if we trust
-    # requests' auto-detected encoding. Force UTF-8 explicitly.
-    resp.encoding = "utf-8"
-    reader = csv.reader(io.StringIO(resp.text))
-    return [row for row in reader if any(cell.strip() for cell in row)]
+def _fetch_csv_rows(url, max_attempts=3):
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            # Google's CSV export doesn't always declare UTF-8 in its headers,
+            # which can silently corrupt non-Latin text (Greek, etc.) if we
+            # trust requests' auto-detected encoding. Force UTF-8 explicitly.
+            resp.encoding = "utf-8"
+            reader = csv.reader(io.StringIO(resp.text))
+            return [row for row in reader if any(cell.strip() for cell in row)]
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            print(f"  ⚠️  Attempt {attempt}/{max_attempts} fetching sheet failed: {e}")
+    raise last_error
 
 
 def load_recipients():
@@ -204,7 +212,7 @@ def get_weather_section():
         "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
         "&timezone=auto"
     )
-    resp = requests.get(url, timeout=15)
+    resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     data = resp.json()["daily"]
 
@@ -244,7 +252,7 @@ _BROWSER_HEADERS = {
 def _get_parsed_feed(feed_url):
     if feed_url not in _feed_cache:
         try:
-            resp = requests.get(feed_url, headers=_BROWSER_HEADERS, timeout=15)
+            resp = requests.get(feed_url, headers=_BROWSER_HEADERS, timeout=20)
             resp.raise_for_status()
             _feed_cache[feed_url] = feedparser.parse(resp.content)
         except Exception:
@@ -407,14 +415,51 @@ def send_telegram_message(chat_id, text):
 # SEND-TIME MATCHING
 # ======================================================================
 
-def _current_zurich_slot():
-    now = datetime.now(LOCAL_TIMEZONE)
-    rounded_minute = (now.minute // 15) * 15
-    return now.replace(minute=rounded_minute).strftime("%H:%M")
+# ======================================================================
+# SEND-TIME MATCHING
+# ======================================================================
+# GitHub's free scheduled Actions are "best effort" - a run every 15
+# minutes can occasionally be delayed or skipped by GitHub itself during
+# busy periods, which could cause an exact-minute match to be missed
+# entirely. To make this reliable, each recipient gets a CATCH WINDOW
+# instead of one exact minute: if the current run happens anytime within
+# WINDOW_MINUTES after their send_time, and they haven't already received
+# today's message, they'll get it now. A small state file (sent_log.json)
+# tracks who's already been sent today so a wide window can't cause
+# duplicate messages.
+
+WINDOW_MINUTES = 30
+SENT_LOG_PATH = "sent_log.json"
 
 
-def _should_send_now(recipient, current_slot, force_all):
-    return force_all or recipient["send_time"] == current_slot
+def _load_sent_log():
+    if os.path.exists(SENT_LOG_PATH):
+        try:
+            with open(SENT_LOG_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_sent_log(log):
+    with open(SENT_LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2, ensure_ascii=False)
+
+
+def _should_send_now(recipient, now, sent_log, force_all):
+    if force_all:
+        return True
+
+    today_str = now.strftime("%Y-%m-%d")
+    if sent_log.get(recipient["name"]) == today_str:
+        return False  # already sent today
+
+    hour, minute = map(int, recipient["send_time"].split(":"))
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    window_end = target + timedelta(minutes=WINDOW_MINUTES)
+
+    return target <= now <= window_end
 
 
 # ======================================================================
@@ -440,20 +485,33 @@ if __name__ == "__main__":
     recipient_names = [r["name"] for r in recipients]
     news_plan = load_news_plan(recipient_names)
 
-    current_slot = _current_zurich_slot()
+    now = datetime.now(LOCAL_TIMEZONE)
+    sent_log = _load_sent_log()
     print(f"Loaded {len(recipients)} recipients, {len(news_plan)} news-plan rows.")
-    print(f"Current Zurich time slot: {current_slot} (force_all={force_all})")
+    print(f"Current Zurich time: {now.strftime('%Y-%m-%d %H:%M')} (force_all={force_all})")
+    print(f"Sent log: {sent_log}")
+
+    log_changed = False
+    today_str = now.strftime("%Y-%m-%d")
 
     for recipient in recipients:
-        if not _should_send_now(recipient, current_slot, force_all):
-            print(f"Skipping {recipient['name']}: scheduled for {recipient['send_time']}, not {current_slot}")
+        if not _should_send_now(recipient, now, sent_log, force_all):
+            already_sent = sent_log.get(recipient["name"]) == today_str
+            reason = "already sent today" if already_sent else f"window is {recipient['send_time']}-+{WINDOW_MINUTES}min"
+            print(f"Skipping {recipient['name']}: {reason}")
             continue
         try:
             message = build_message_for_recipient(recipient, news_plan)
             print(f"--- Sending to {recipient['name']} ({recipient['chat_id']}) ---")
             send_telegram_message(recipient["chat_id"], message)
+            sent_log[recipient["name"]] = today_str
+            log_changed = True
         except Exception as e:
             # Never let one recipient's failure (bad feed, network hiccup,
             # etc.) stop the whole run - log it and keep going so everyone
             # else still gets their message.
             print(f"  ❌ Failed to build/send message for {recipient['name']}: {e}")
+
+    if log_changed:
+        _save_sent_log(sent_log)
+        print("Updated sent_log.json")
