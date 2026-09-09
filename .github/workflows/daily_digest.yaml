@@ -3,11 +3,11 @@ name: Daily Digest
 on:
   schedule:
     # Runs every 15 minutes, around the clock. The script itself checks
-    # each recipient's "send_time" (set in daily_digest.py) against the
-    # current time in Zurich and only actually sends a message when it's
-    # that recipient's turn - so this single schedule covers everyone,
-    # no matter what time you set for each person, and it stays correct
-    # across daylight saving changes automatically.
+    # each recipient's "Time" (set in your Google Sheet's Recipients tab)
+    # against the current time in Zurich and only actually sends a message
+    # within that person's catch window - so this single schedule covers
+    # everyone, no matter what time you set for each person, and it stays
+    # correct across daylight saving changes automatically.
     - cron: "*/15 * * * *"
   workflow_dispatch:
     inputs:
