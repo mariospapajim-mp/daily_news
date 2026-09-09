@@ -269,13 +269,14 @@ _geocode_cache = {}
 _weather_data_cache = {}
 
 
-def geocode_location(location_name, language=DEFAULT_LANGUAGE):
+def geocode_location(location_name, language=DEFAULT_LANGUAGE, max_attempts=3):
     """
     Turns a plain city name (e.g. "Athens") into (name, lat, lon) using
     Open-Meteo's free geocoding API - so recipients just type a city name
     in the sheet, no coordinates needed. Best results come from typing the
     name in English/Latin script, but this also passes the recipient's
     chosen language as a hint to help match local-script names too.
+    Retries a few times on network hiccups before giving up.
     """
     cache_key = (location_name, language)
     if cache_key in _geocode_cache:
@@ -285,20 +286,39 @@ def geocode_location(location_name, language=DEFAULT_LANGUAGE):
         f"https://geocoding-api.open-meteo.com/v1/search"
         f"?name={urllib.parse.quote(location_name)}&count=1&language={language}"
     )
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    results = resp.json().get("results")
-    if not results:
-        raise ValueError(f"Could not find location {location_name!r} - check spelling in the sheet")
 
-    result = results[0]
-    resolved = (result.get("name", location_name), result["latitude"], result["longitude"])
-    _geocode_cache[cache_key] = resolved
-    return resolved
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            results = resp.json().get("results")
+            if not results:
+                raise ValueError(f"Could not find location {location_name!r} - check spelling in the sheet")
+            result = results[0]
+            resolved = (result.get("name", location_name), result["latitude"], result["longitude"])
+            _geocode_cache[cache_key] = resolved
+            return resolved
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            print(f"  ⚠️  Attempt {attempt}/{max_attempts} geocoding {location_name!r} failed: {e}")
+
+    raise last_error
+
+
+# Hardcoded last-resort coordinates, only used if geocoding a recipient's
+# Location fails entirely (e.g. a typo, or the geocoding service being
+# briefly unreachable) - so a bad/unresolvable location can't take down
+# that person's whole message, just their location for the day.
+_FALLBACK_LOCATION = ("Dietikon", 47.4047, 8.4006)
 
 
 def get_weather_section(location_name, language):
-    resolved_name, lat, lon = geocode_location(location_name, language)
+    try:
+        resolved_name, lat, lon = geocode_location(location_name, language)
+    except Exception as e:
+        resolved_name, lat, lon = _FALLBACK_LOCATION
+        print(f"  ⚠️  Falling back to {resolved_name} - couldn't geocode {location_name!r}: {e}")
 
     if (lat, lon) not in _weather_data_cache:
         url = (
