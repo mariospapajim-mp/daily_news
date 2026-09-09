@@ -52,16 +52,63 @@ NEWS_PLAN_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?f
 SOURCES_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=651822256"
 
 # ======================================================================
-# WEATHER LOCATION (shared by everyone - edit here if you ever move)
+# WEATHER (each recipient now has their own city - see Location column in
+# your Recipients sheet tab, geocoded automatically at runtime)
 # ======================================================================
 
-WEATHER_LOCATION = {
-    "name": "Dietikon",
-    "latitude": 47.4047,
-    "longitude": 8.4006,
+DEFAULT_LOCATION_NAME = "Dietikon"  # used if a recipient's Location cell is blank
+LOCAL_TIMEZONE = ZoneInfo("Europe/Zurich")
+
+# ======================================================================
+# TRANSLATIONS - add a language by adding a new key here (e.g. "de") and
+# filling in every field. Recipients pick a language via the "Language"
+# column in the Recipients sheet tab (use the 2-letter code: en, el).
+# ======================================================================
+
+TRANSLATIONS = {
+    "en": {
+        "greeting_morning": "Good morning",
+        "greeting_afternoon": "Good afternoon",
+        "greeting_evening": "Good evening",
+        "weather_label": "Weather",
+        "news_label": "News",
+        "today": "Today",
+        "tomorrow": "Tomorrow",
+        "no_categories": "(no categories selected)",
+        "weekdays": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+        "months": ["January", "February", "March", "April", "May", "June", "July",
+                   "August", "September", "October", "November", "December"],
+    },
+    "el": {
+        "greeting_morning": "Καλημέρα",
+        "greeting_afternoon": "Καλό απόγευμα",
+        "greeting_evening": "Καλησπέρα",
+        "weather_label": "Καιρός",
+        "news_label": "Νέα",
+        "today": "Σήμερα",
+        "tomorrow": "Αύριο",
+        "no_categories": "(δεν έχουν επιλεγεί κατηγορίες)",
+        "weekdays": ["Δευτέρα", "Τρίτη", "Τετάρτη", "Πέμπτη", "Παρασκευή", "Σάββατο", "Κυριακή"],
+        "months": ["Ιανουαρίου", "Φεβρουαρίου", "Μαρτίου", "Απριλίου", "Μαΐου", "Ιουνίου",
+                   "Ιουλίου", "Αυγούστου", "Σεπτεμβρίου", "Οκτωβρίου", "Νοεμβρίου", "Δεκεμβρίου"],
+    },
 }
 
-LOCAL_TIMEZONE = ZoneInfo("Europe/Zurich")
+DEFAULT_LANGUAGE = "en"
+
+
+def _t(language, key):
+    """Translation lookup with a safe fallback to English."""
+    return TRANSLATIONS.get(language, TRANSLATIONS[DEFAULT_LANGUAGE]).get(
+        key, TRANSLATIONS[DEFAULT_LANGUAGE].get(key, key)
+    )
+
+
+def _format_date(now, language):
+    strings = TRANSLATIONS.get(language, TRANSLATIONS[DEFAULT_LANGUAGE])
+    weekday = strings["weekdays"][now.weekday()]
+    month = strings["months"][now.month - 1]
+    return f"{weekday}, {now.day} {month} {now.year}"
 
 # ======================================================================
 # NEWS SOURCES - now loaded live from your "Sources" sheet tab (see
@@ -97,20 +144,32 @@ def _fetch_csv_rows(url, max_attempts=3):
 
 
 def load_recipients():
-    """Reads the 'Recipients' tab: Name | ChatID | Time"""
+    """Reads the 'Recipients' tab: Name | ChatID | Time | Language | Location"""
     rows = _fetch_csv_rows(RECIPIENTS_CSV_URL)
     header, data_rows = rows[0], rows[1:]
     recipients = []
     for row in data_rows:
-        name, chat_id, send_time = (row + ["", "", ""])[:3]
+        row = row + [""] * (5 - len(row))
+        name, chat_id, send_time, language, location = row[:5]
         name, chat_id, send_time = name.strip(), chat_id.strip(), send_time.strip()
+        language = language.strip().lower() or DEFAULT_LANGUAGE
+        location = location.strip() or DEFAULT_LOCATION_NAME
         if not name or not chat_id:
             continue
         # Normalize times like "7:00" or "7:5" to "07:00" / "07:05"
         if ":" in send_time:
             h, m = send_time.split(":", 1)
             send_time = f"{int(h):02d}:{int(m):02d}"
-        recipients.append({"name": name, "chat_id": chat_id, "send_time": send_time})
+        if language not in TRANSLATIONS:
+            print(f"  ⚠️  {name}: unknown language {language!r} in sheet, falling back to {DEFAULT_LANGUAGE!r}")
+            language = DEFAULT_LANGUAGE
+        recipients.append({
+            "name": name,
+            "chat_id": chat_id,
+            "send_time": send_time,
+            "language": language,
+            "location_name": location,
+        })
     return recipients
 
 
@@ -179,48 +238,107 @@ def load_sources():
 # ======================================================================
 
 WEATHER_CODES = {
-    0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Depositing rime fog",
-    51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
-    61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
-    71: "Slight snow", 73: "Moderate snow", 75: "Heavy snow",
-    80: "Rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
-    95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail",
+    "en": {
+        0: "Clear sky", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+        45: "Fog", 48: "Depositing rime fog",
+        51: "Light drizzle", 53: "Moderate drizzle", 55: "Dense drizzle",
+        61: "Slight rain", 63: "Moderate rain", 65: "Heavy rain",
+        71: "Slight snow", 73: "Moderate snow", 75: "Heavy snow",
+        80: "Rain showers", 81: "Moderate rain showers", 82: "Violent rain showers",
+        95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with heavy hail",
+    },
+    "el": {
+        0: "Αίθριος", 1: "Κυρίως αίθριος", 2: "Μερική νέφωση", 3: "Συννεφιά",
+        45: "Ομίχλη", 48: "Ομίχλη με πάχνη",
+        51: "Ελαφρύ ψιλόβροχο", 53: "Μέτριο ψιλόβροχο", 55: "Πυκνό ψιλόβροχο",
+        61: "Ελαφριά βροχή", 63: "Μέτρια βροχή", 65: "Δυνατή βροχή",
+        71: "Ελαφριά χιονόπτωση", 73: "Μέτρια χιονόπτωση", 75: "Έντονη χιονόπτωση",
+        80: "Μπόρες βροχής", 81: "Μέτριες μπόρες", 82: "Ραγδαίες μπόρες",
+        95: "Καταιγίδα", 96: "Καταιγίδα με χαλάζι", 99: "Καταιγίδα με έντονο χαλάζι",
+    },
 }
 
-_weather_cache = None
+
+def _weather_description(code, language):
+    codes = WEATHER_CODES.get(language, WEATHER_CODES[DEFAULT_LANGUAGE])
+    fallback = "Unknown conditions" if language == "en" else "Άγνωστες συνθήκες"
+    return codes.get(code, fallback)
 
 
-def get_weather_section():
-    global _weather_cache
-    if _weather_cache is not None:
-        return _weather_cache
+_geocode_cache = {}
+_weather_data_cache = {}
 
-    loc = WEATHER_LOCATION
+
+def geocode_location(location_name, language=DEFAULT_LANGUAGE):
+    """
+    Turns a plain city name (e.g. "Athens") into (name, lat, lon) using
+    Open-Meteo's free geocoding API - so recipients just type a city name
+    in the sheet, no coordinates needed. Best results come from typing the
+    name in English/Latin script, but this also passes the recipient's
+    chosen language as a hint to help match local-script names too.
+    """
+    cache_key = (location_name, language)
+    if cache_key in _geocode_cache:
+        return _geocode_cache[cache_key]
+
     url = (
-        "https://api.open-meteo.com/v1/forecast"
-        f"?latitude={loc['latitude']}&longitude={loc['longitude']}"
-        "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-        "&timezone=auto"
+        f"https://geocoding-api.open-meteo.com/v1/search"
+        f"?name={urllib.parse.quote(location_name)}&count=1&language={language}"
     )
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
-    data = resp.json()["daily"]
+    results = resp.json().get("results")
+    if not results:
+        raise ValueError(f"Could not find location {location_name!r} - check spelling in the sheet")
+
+    result = results[0]
+    resolved = (result.get("name", location_name), result["latitude"], result["longitude"])
+    _geocode_cache[cache_key] = resolved
+    return resolved
+
+
+def get_weather_section(location_name, language):
+    resolved_name, lat, lon = geocode_location(location_name, language)
+
+    if (lat, lon) not in _weather_data_cache:
+        url = (
+            "https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            "&daily=weathercode,temperature_2m_max,temperature_2m_min,"
+            "precipitation_probability_max,sunrise,sunset"
+            "&timezone=auto"
+        )
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        _weather_data_cache[(lat, lon)] = resp.json()["daily"]
+
+    data = _weather_data_cache[(lat, lon)]
 
     def day_line(label, i):
         code = data["weathercode"][i]
         tmax = data["temperature_2m_max"][i]
         tmin = data["temperature_2m_min"][i]
         rain_chance = data["precipitation_probability_max"][i]
-        description = WEATHER_CODES.get(code, "Unknown conditions")
+        description = _weather_description(code, language)
         return (
             f"<b>{label}:</b> {description}, {tmin:.0f}°C–{tmax:.0f}°C, "
             f"☔ {rain_chance}%"
         )
 
-    lines = [f"📍 {loc['name']}", day_line("Today", 0), day_line("Tomorrow", 1)]
-    _weather_cache = "\n".join(lines)
-    return _weather_cache
+    def sun_times_line(i):
+        # Open-Meteo returns ISO datetimes like "2026-09-03T06:45" (already
+        # in the location's local time since we passed timezone=auto).
+        sunrise = data["sunrise"][i].split("T")[1]
+        sunset = data["sunset"][i].split("T")[1]
+        return f"🌅 {sunrise}  🌇 {sunset}"
+
+    lines = [
+        f"📍 {resolved_name}",
+        day_line(_t(language, "today"), 0),
+        sun_times_line(0),
+        day_line(_t(language, "tomorrow"), 1),
+    ]
+    return "\n".join(lines)
 
 
 # ======================================================================
@@ -311,7 +429,7 @@ def _headlines_for_row(source_name, category_name, limit):
     return []
 
 
-def get_news_section_for_recipient(recipient_name, news_plan):
+def get_news_section_for_recipient(recipient_name, news_plan, language):
     by_source = {}
     for source_name, category_name, counts in news_plan:
         limit = counts.get(recipient_name, 0)
@@ -342,7 +460,7 @@ def get_news_section_for_recipient(recipient_name, news_plan):
         body = "\n\n".join(source_block_lines)
         sections.append(f"📰 <b>{source_name}</b>\n{body}{link_line}")
 
-    return "\n\n".join(sections) if sections else "(no categories selected)"
+    return "\n\n".join(sections) if sections else _t(language, "no_categories")
 
 
 # ======================================================================
@@ -420,15 +538,28 @@ def _should_send_now(recipient, now, sent_log, force_all):
 # MAIN
 # ======================================================================
 
+def _greeting_for_hour(hour, language):
+    if hour < 12:
+        return _t(language, "greeting_morning")
+    elif hour < 18:
+        return _t(language, "greeting_afternoon")
+    else:
+        return _t(language, "greeting_evening")
+
+
 def build_message_for_recipient(recipient, news_plan):
-    today_str = datetime.now(LOCAL_TIMEZONE).strftime("%A, %d %B %Y")
-    weather_section = get_weather_section()
-    news_section = get_news_section_for_recipient(recipient["name"], news_plan)
+    now = datetime.now(LOCAL_TIMEZONE)
+    language = recipient["language"]
+    date_str = _format_date(now, language)
+    greeting = _greeting_for_hour(now.hour, language)
+    weather_section = get_weather_section(recipient["location_name"], language)
+    news_section = get_news_section_for_recipient(recipient["name"], news_plan, language)
 
     return (
-        f"<b>☀️ Daily Digest — {today_str}</b>\n\n"
-        f"<b>Weather</b>\n{weather_section}\n\n"
-        f"<b>News</b>\n{news_section}"
+        f"<b>☀️ {greeting}, {recipient['name']}!</b>\n"
+        f"<i>{date_str}</i>\n\n"
+        f"<b>{_t(language, 'weather_label')}</b>\n{weather_section}\n\n"
+        f"<b>{_t(language, 'news_label')}</b>\n{news_section}"
     )
 
 
