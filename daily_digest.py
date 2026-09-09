@@ -49,6 +49,7 @@ import feedparser
 SHEET_ID = "1nqe0sPAcu3SPPa9C07ArXqWbYCx1NhPKwfBFQ0y0PuM"
 RECIPIENTS_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=2057126119"
 NEWS_PLAN_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=0"
+SOURCES_CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid=651822256"
 
 # ======================================================================
 # WEATHER LOCATION (shared by everyone - edit here if you ever move)
@@ -63,54 +64,15 @@ WEATHER_LOCATION = {
 LOCAL_TIMEZONE = ZoneInfo("Europe/Zurich")
 
 # ======================================================================
-# NEWS SOURCES - technical definition of every available category.
-# This is the one part of the whole system that still lives in code,
-# because it involves real RSS feed URLs. You won't need to touch this
-# unless you want to add a brand-new news source/category beyond what's
-# already offered in your NewsPlan sheet.
+# NEWS SOURCES - now loaded live from your "Sources" sheet tab (see
+# load_sources() below). To add a brand-new news source or category from
+# now on, just add a row to that tab: Source | Category | FeedURL |
+# Homepage. No code changes needed, ever.
 # ======================================================================
 
-NEWS_SOURCES = {
-    "20 Minuten": {
-        "homepage": "https://www.20min.ch",
-        "categories": {
-            "Top Stories": {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten"},
-            "Schweiz":     {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/schweiz"},
-            "Sport":       {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/sport"},
-            "Wirtschaft":  {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/wirtschaft"},
-            "Regionen":    {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/regionen"},
-            "Lifestyle":   {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/lifestyle"},
-            "Ausland":     {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/ausland"},
-            "People":      {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/people"},
-            "Good Vibes":  {"feed_url": "https://partner-feeds.20min.ch/rss/20minuten/good-vibes"},
-        },
-    },
-    "Πρώτο Θέμα": {
-        "homepage": "https://www.protothema.gr",
-        "main_feed_url": "https://www.protothema.gr/rss",
-        # Πρώτο Θέμα publishes a dedicated RSS feed per section, same as
-        # 20 Minuten (confirmed directly for car-and-speed, economy,
-        # environment, and culture/theater). Each category below uses its
-        # own feed rather than filtering the main feed, which is more
-        # reliable. If a slug guess below turns out wrong, the automatic
-        # Google News fallback (see _headlines_for_row) still catches it.
-        "categories": {
-            "Ελλάδα":      {"feed_url": "https://www.protothema.gr/greece/rss"},
-            "Κόσμος":      {"feed_url": "https://www.protothema.gr/world/rss"},
-            "Πολιτική":    {"feed_url": "https://www.protothema.gr/politics/rss"},
-            "Οικονομία":   {"feed_url": "https://www.protothema.gr/economy/rss"},
-            "Sports":      {"feed_url": "https://www.protothema.gr/sports/rss"},
-            "Gala":        {"feed_url": "https://www.protothema.gr/life-style/rss"},
-            "Αυτοκίνητο":  {"feed_url": "https://www.protothema.gr/car-and-speed/rss"},
-            "People":      {"feed_url": "https://www.protothema.gr/world/rss"},
-            "Πολιτισμός":  {"feed_url": "https://www.protothema.gr/culture/rss"},
-            "Τεχνολογία":  {"feed_url": "https://www.protothema.gr/technology/rss"},
-            "Περιβάλλον":  {"feed_url": "https://www.protothema.gr/environment/rss"},
-            "Υγεία + Ζωή": {"feed_url": "https://www.protothema.gr/zoi/rss"},
-            "Life Style":  {"feed_url": "https://www.protothema.gr/life-style/rss"},
-        },
-    },
-}
+# Populated at startup from your "Sources" sheet tab - see load_sources()
+# and the bottom of this file where it's assigned.
+NEWS_SOURCES = {}
 
 # ======================================================================
 # READ CONFIG LIVE FROM GOOGLE SHEETS
@@ -181,6 +143,35 @@ def load_news_plan(recipient_names):
                     break
         plan.append((source_name, category_name, counts))
     return plan
+
+
+def load_sources():
+    """
+    Reads the 'Sources' tab: Source | Category | FeedURL | Homepage
+    Returns a dict shaped like: {source_name: {"homepage": ..., "categories":
+    {category_name: {"feed_url": ...}}}} - same shape the rest of the script
+    already expects, just built from the sheet instead of hardcoded.
+    """
+    rows = _fetch_csv_rows(SOURCES_CSV_URL)
+    header, data_rows = rows[0], rows[1:]
+
+    sources = {}
+    for row in data_rows:
+        row = row + [""] * (len(header) - len(row))
+        source_name, category_name, feed_url, homepage = (row + ["", "", "", ""])[:4]
+        source_name, category_name = source_name.strip(), category_name.strip()
+        feed_url, homepage = feed_url.strip(), homepage.strip()
+        if not source_name or not category_name or not feed_url:
+            continue
+
+        if source_name not in sources:
+            sources[source_name] = {"homepage": homepage, "categories": {}}
+        elif homepage and not sources[source_name].get("homepage"):
+            sources[source_name]["homepage"] = homepage
+
+        sources[source_name]["categories"][category_name] = {"feed_url": feed_url}
+
+    return sources
 
 
 # ======================================================================
@@ -317,43 +308,6 @@ def _headlines_for_row(source_name, category_name, limit):
         section_path = feed_url.replace(source_cfg.get("homepage", ""), "").rsplit("/rss", 1)[0]
         return _google_news_fallback(source_cfg, category_name, section_path, limit)
 
-    elif "filter_tag" in category_cfg or "filter_path" in category_cfg:
-        parsed = _get_parsed_feed(source_cfg["main_feed_url"])
-        matches = []
-
-        if "filter_path" in category_cfg:
-            wanted = category_cfg["filter_path"]
-            match_label = f"path '/{wanted}/'"
-            for entry in parsed.entries:
-                link = entry.get("link", "")
-                if f"/{wanted}/article/" in link:
-                    title = entry.get("title", "").strip()
-                    if title:
-                        matches.append(title)
-                if len(matches) >= limit:
-                    break
-        else:
-            wanted = category_cfg["filter_tag"]
-            match_label = f"tag {wanted!r}"
-            for entry in parsed.entries:
-                tags = [t.get("term", "") for t in entry.get("tags", [])]
-                if wanted in tags:
-                    title = entry.get("title", "").strip()
-                    if title:
-                        matches.append(title)
-                if len(matches) >= limit:
-                    break
-
-        if matches:
-            return matches
-
-        print(f"  ℹ️  No match by {match_label} in recent {source_name} feed - trying Google News fallback")
-        if "filter_path" in category_cfg:
-            scope_suffix = f"/{category_cfg['filter_path']}"
-        else:
-            scope_suffix = f" {category_cfg['filter_tag']}"
-        return _google_news_fallback(source_cfg, category_name, scope_suffix, limit)
-
     return []
 
 
@@ -481,15 +435,36 @@ def build_message_for_recipient(recipient, news_plan):
 if __name__ == "__main__":
     force_all = os.environ.get("FORCE_SEND_ALL") == "1"
 
+    NEWS_SOURCES = load_sources()
     recipients = load_recipients()
     recipient_names = [r["name"] for r in recipients]
     news_plan = load_news_plan(recipient_names)
 
     now = datetime.now(LOCAL_TIMEZONE)
     sent_log = _load_sent_log()
-    print(f"Loaded {len(recipients)} recipients, {len(news_plan)} news-plan rows.")
+    print(f"Loaded {len(NEWS_SOURCES)} sources, {len(recipients)} recipients, {len(news_plan)} news-plan rows.")
     print(f"Current Zurich time: {now.strftime('%Y-%m-%d %H:%M')} (force_all={force_all})")
     print(f"Sent log: {sent_log}")
+
+    # Sanity check: every (Source, Category) row in NewsPlan should have a
+    # matching row in Sources. Catch mismatches here and print them clearly,
+    # rather than letting them silently show up as "missing" categories in
+    # someone's message with no obvious explanation.
+    mismatches = []
+    for source_name, category_name, counts in news_plan:
+        if not any(v > 0 for v in counts.values()):
+            continue  # nobody's using this row anyway, skip the check
+        source_cfg = NEWS_SOURCES.get(source_name)
+        if not source_cfg:
+            mismatches.append(f"'{source_name}' (in NewsPlan) has no matching Source in your Sources tab")
+        elif category_name not in source_cfg["categories"]:
+            mismatches.append(f"'{source_name}' / '{category_name}' (in NewsPlan) has no matching row in your Sources tab")
+    if mismatches:
+        print(f"  ⚠️  {len(mismatches)} NewsPlan/Sources mismatch(es) found:")
+        for m in mismatches:
+            print(f"     - {m}")
+    else:
+        print("  ✅ Every active NewsPlan row matches a Sources row.")
 
     log_changed = False
     today_str = now.strftime("%Y-%m-%d")
