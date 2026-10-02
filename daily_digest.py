@@ -328,9 +328,18 @@ def get_weather_section(location_name, language):
             "precipitation_probability_max,sunrise,sunset"
             "&timezone=auto"
         )
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        _weather_data_cache[(lat, lon)] = resp.json()["daily"]
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                resp = requests.get(url, timeout=20)
+                resp.raise_for_status()
+                _weather_data_cache[(lat, lon)] = resp.json()["daily"]
+                break
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                print(f"  ⚠️  Attempt {attempt}/3 fetching forecast for {resolved_name} failed: {e}")
+        else:
+            raise last_error
 
     data = _weather_data_cache[(lat, lon)]
 
